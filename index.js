@@ -129,6 +129,14 @@ async function run() {
       const result = await mealsCollection.find().toArray()
       res.status(202).send(result)
     })
+    app.get("/allMeals/descending",async (req,res)=>{
+      const result = await mealsCollection.find().sort({price:-1}).toArray()
+      res.status(202).send(result)
+    })
+    app.get("/allMeals/ascending",async (req,res)=>{
+      const result = await mealsCollection.find().sort({price:1}).toArray()
+      res.status(202).send(result)
+    })
 
     // Meal Details API........
     app.get("/mealDetails/:id",async (req,res)=>{
