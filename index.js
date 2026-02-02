@@ -1,12 +1,16 @@
 const express = require("express");
 const app = express();
 const cors = require("cors");
+
 require("dotenv").config();
 
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 
 const port = process.env.PORT || 3000;
 const uri = `mongodb+srv://${process.env.MONGODB_USER_NAME}:${process.env.MONGODB_PASSWORD}@cluster1.19ohfxv.mongodb.net/?appName=Cluster1`;
+
+// Strip Url
+const stripe = require("stripe")(process.env.STRIP_PASSWORD);
 
 const client = new MongoClient(uri, {
   serverApi: {
@@ -36,6 +40,7 @@ async function run() {
     const usersReviewCollection = bd.collection("review");
     const usersFavoriteFoodCollection = bd.collection("favoriteFood");
     const orderedFoodCollection = bd.collection("orderedFood");
+    const paymentCollection = bd.collection("payment");
 
     // Users Related APi .............
     // User Post To Data Base...........
@@ -131,11 +136,19 @@ async function run() {
     app.post("/meals", async (req, res) => {
       const mealsInfo = req.body;
       mealsInfo.createAt = new Date();
+      const query = {
+        foodName: mealsInfo.foodName,
+        chefName: mealsInfo.chefName,
+      };
+      const duplicateFound = await mealsCollection.findOne(query);
+      if (duplicateFound) {
+        return res.send({ message: "you are already Applied" });
+      }
       const result = await mealsCollection.insertOne(mealsInfo);
       res.status(200).send(result);
     });
 
-    // Image Upload API..
+    // // Image Upload API..
     app.patch("/meals/image", async (req, res) => {
       const mealsImgInfo = req.body;
       const query = { foodName: mealsImgInfo.foodName };
@@ -302,20 +315,19 @@ async function run() {
       if (duplicateFound) {
         return res.send({ message: "you are already Applied" });
       }
-
-      app.get("/userFavoriteFood", async (req, res) => {
-        const { email } = req.query;
-        const query = {
-          userEmail: email,
-        };
-        const result = await usersFavoriteFoodCollection.find(query).toArray();
-
-        res.send(result);
-      });
-
       const result =
         await usersFavoriteFoodCollection.insertOne(favoriteFoodInfo);
       res.status(202).send(result);
+    });
+
+    app.get("/userFavoriteFood", async (req, res) => {
+      const { email } = req.query;
+      const query = {
+        userEmail: email,
+      };
+      const result = await usersFavoriteFoodCollection.find(query).toArray();
+
+      res.send(result);
     });
 
     app.post("/userFavoriteFood/delete", async (req, res) => {
@@ -368,6 +380,144 @@ async function run() {
       const result = await orderedFoodCollection.find(query).toArray();
 
       res.send(result);
+    });
+
+    app.post("/orderedFood/delete", async (req, res) => {
+      const { id } = req.body;
+      const query = { _id: new ObjectId(id) };
+      const result = await orderedFoodCollection.deleteOne(query);
+      res.status(202).send(result);
+    });
+
+    // Payment Related Api............
+    app.post("/create-checkout-session", async (req, res) => {
+      const paymentInfo = req.body;
+      console.log(paymentInfo);
+      const amonut = parseInt(paymentInfo.foodPrice) * 100;
+      const session = await stripe.checkout.sessions.create({
+        line_items: [
+          {
+            price_data: {
+              currency: "USD",
+              product_data: {
+                name: paymentInfo.foodName,
+              },
+              unit_amount: amonut,
+            },
+
+            quantity: 1,
+          },
+        ],
+        metadata: {
+          foodId: paymentInfo.id,
+          foodName: paymentInfo.foodName,
+        },
+        customer_email: paymentInfo?.email,
+        mode: "payment",
+        success_url: `${process.env.CLIENT_DOMAIN}/dashboard/paymentSuccess?session_id={CHECKOUT_SESSION_ID}`,
+        cancel_url: `${process.env.CLIENT_DOMAIN}/dashboard/paymentCancelled`,
+      });
+      console.log(session);
+      res.send({ url: session.url });
+    });
+
+    // app.patch("/payment-success", async (req, res) => {
+    //   const session_id = req.query.session_id;
+
+    //   const session = await stripe.checkout.sessions.retrieve(session_id);
+    //   const id = session.metadata.foodId;
+    //   console.log(session);
+    //   if (session.payment_status === "paid") {
+    //     const query = { _id: new ObjectId(id) };
+    //     const updateData = {
+    //       $set: {
+    //         paymentStatus: "paid",
+    //       },
+    //     };
+
+    //     await orderedFoodCollection.updateOne(query, updateData);
+    //     // res.send(result);
+
+    //     const paymentInfo = {
+    //       paymentStatus: session.payment_status,
+    //       foodId: session.metadata.foodId,
+    //       amountTotal: session.amount_total / 100,
+    //       customerEmail: session.customer_email,
+    //       transactionId: session.payment_intent,
+    //       foodName: session.metadata.foodName,
+    //       paidTime: new Date(),
+    //       trackingId: Math.floor(Math.random() * (9900 - 5500 + 1)) + 5500,
+    //     };
+    //     // const queryNext = {
+    //     //   foodId: session.metadata.foodId,
+    //     // };
+    //     const duplicateFound = await paymentCollection.findOne(query);
+    //     if (duplicateFound) {
+    //       return;
+    //     }
+
+    //     const result = await paymentCollection.insertOne(paymentInfo);
+
+    //     res.send(result);
+    //   }
+
+    //   res.send({ Payment: "Not Fount" });
+    // });
+
+    app.patch("/payment-success", async (req, res) => {
+      const session_id = req.query.session_id;
+      const session = await stripe.checkout.sessions.retrieve(session_id);
+
+      if (session.payment_status !== "paid") {
+        return res.status(400).send({ message: "Payment not completed" });
+      }
+
+      const foodId = session.metadata.foodId;
+
+      await orderedFoodCollection.updateOne(
+        { _id: new ObjectId(foodId) },
+        { $set: { paymentStatus: "paid" } },
+      );
+
+      const paymentInfo = {
+        paymentStatus: session.payment_status,
+        foodId,
+        amountTotal: session.amount_total / 100,
+        customerEmail: session.customer_email,
+        transactionId: session.payment_intent,
+        foodName: session.metadata.foodName,
+        paidTime: new Date(),
+        trackingId: Math.floor(Math.random() * (9900 - 5500 + 1)) + 5500,
+      };
+
+      const duplicateFound = await paymentCollection.findOne({
+        transactionId: session.payment_intent,
+      });
+
+      if (duplicateFound) {
+        return res.send({ message: "Payment already recorded" });
+      }
+
+      const result = await paymentCollection.insertOne(paymentInfo);
+      return res.send(result);
+    });
+
+    app.get("/paymentInformation", async (req, res) => {
+      const { email } = req.query;
+      console.log(email);
+      const query = {
+        customerEmail: email,
+      };
+
+      const result = await paymentCollection.find(query).toArray();
+      res.send(result);
+    });
+
+    app.post("/paymentInformation/delete", async (req, res) => {
+      const { id } = req.body;
+      const query = { _id: new ObjectId(id) };
+      const result = await paymentCollection.deleteOne(query);
+      res.status(202).send(result);
     });
 
     await client.db("admin").command({ ping: 1 });
